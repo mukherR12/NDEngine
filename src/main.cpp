@@ -93,3 +93,16 @@ const std::vector<uint16_t> indices = {
 	2, 3, 0,
 };
 
+class VulkanTest {
+
+public:
+	void run() {
+		initWindow();
+		initVulkan();
+		mainLoop();
+		cleanup();
+	}
+
+private:
+
+};
