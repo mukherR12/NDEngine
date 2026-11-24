@@ -142,7 +142,7 @@ private:
 	uint32_t frameIndex = 0;
 	uint32_t presentCompleteSemaphoreIndex = 0;
 	bool frameBufferResized = false;
-
+	
 	void initWindow() {
 		glfwInit();
 
@@ -176,9 +176,9 @@ private:
 		createGraphicsPipeline();
 		createCommandPool();
 		//createTextureImage();
-		//createVertexBuffer();
-		//createIndexBuffer();
-		//createUniformBuffers();
+		createVertexBuffer();
+		createIndexBuffer();
+		createUniformBuffers();
 		//createDescriptorPool();
 		//createDescriptorSets();
 		createCommandBuffer();
@@ -537,6 +537,158 @@ private:
 		std::cout << "Created Command Pool...\n";
 	}
 
+	void createVertexBuffer() {
+		vk::DeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
+
+		auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+		void* dataStaging = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(dataStaging, vertices.data(), bufferSize);
+		stagingBufferMemory.unmapMemory();
+
+		std::tie(vertexBuffer, vertexBufferMemory) = createBuffer(bufferSize, vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+		copyBuffer(stagingBuffer, vertexBuffer, bufferSize);
+	}
+
+	void createIndexBuffer() {
+		vk::DeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+
+		auto [stagingBuffer, stagingBufferMemory] = createBuffer(bufferSize, vk::BufferUsageFlagBits::eTransferSrc, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+		void* data = stagingBufferMemory.mapMemory(0, bufferSize);
+		memcpy(data, indices.data(), (size_t)bufferSize);
+		stagingBufferMemory.unmapMemory();
+
+		std::tie(indexBuffer, indexBufferMemory) = createBuffer(bufferSize, vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst, vk::MemoryPropertyFlagBits::eDeviceLocal);
+
+		copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+	}
+
+	void createUniformBuffers()
+	{
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+		{
+			vk::DeviceSize bufferSize = sizeof(UniformBufferObject);
+			auto [buffer, bufferMem] = createBuffer(
+				bufferSize, vk::BufferUsageFlagBits::eUniformBuffer, vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+			uniformBuffers.emplace_back(std::move(buffer));
+			uniformBuffersMemory.emplace_back(std::move(bufferMem));
+			uniformBuffersMapped.emplace_back(uniformBuffersMemory.back().mapMemory(0, bufferSize));
+		}
+	}
+
+	void copyBuffer(vk::raii::Buffer& srcBuffer, vk::raii::Buffer& dstBuffer, vk::DeviceSize size)
+	{
+		vk::raii::CommandBuffer commandCopyBuffer = beginSingleTimeCommands();
+		vk::BufferCopy bufferCopy{};
+		bufferCopy.size = size;
+		commandCopyBuffer.copyBuffer(*srcBuffer, *dstBuffer, bufferCopy);
+		endSingleTimeCommands(std::move(commandCopyBuffer));
+	}
+
+	void transitionImageLayout(vk::raii::CommandBuffer& commandBuffer, const vk::raii::Image& image, vk::ImageLayout oldLayout, vk::ImageLayout newLayout) {
+		vk::ImageMemoryBarrier barrier{};
+		barrier.oldLayout = oldLayout;
+		barrier.newLayout = newLayout;
+		barrier.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+		barrier.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+		barrier.image = image;
+		vk::ImageSubresourceRange imageSubresourceRange{};
+		imageSubresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+		imageSubresourceRange.levelCount = static_cast<uint8_t>(1);
+		imageSubresourceRange.layerCount = static_cast<uint8_t>(1);
+		barrier.subresourceRange = imageSubresourceRange;
+
+		vk::PipelineStageFlags sourceStage;
+		vk::PipelineStageFlags destinationStage;
+
+		if (oldLayout == vk::ImageLayout::eUndefined && newLayout == vk::ImageLayout::eTransferDstOptimal)
+		{
+			barrier.srcAccessMask = {};
+			barrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+
+			sourceStage = vk::PipelineStageFlagBits::eTopOfPipe;
+			destinationStage = vk::PipelineStageFlagBits::eTransfer;
+		}
+		else if (oldLayout == vk::ImageLayout::eTransferDstOptimal && newLayout == vk::ImageLayout::eShaderReadOnlyOptimal)
+		{
+			barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+
+			sourceStage = vk::PipelineStageFlagBits::eTransfer;
+			destinationStage = vk::PipelineStageFlagBits::eFragmentShader;
+		}
+		else
+		{
+			throw std::invalid_argument("unsupported layout transition!");
+		}
+
+		commandBuffer.pipelineBarrier(sourceStage, destinationStage, {}, {}, {}, barrier);
+	}
+
+	void copyBufferToImage(vk::raii::CommandBuffer& commandBuffer, const vk::raii::Buffer& buffer, vk::raii::Image& image, uint32_t width, uint32_t height)
+	{
+		vk::ImageSubresourceLayers imageSubresourceLayers{};
+		imageSubresourceLayers.aspectMask = vk::ImageAspectFlagBits::eColor;
+		imageSubresourceLayers.mipLevel = 0;
+		imageSubresourceLayers.baseArrayLayer = 0;
+		imageSubresourceLayers.layerCount = 1;
+
+		vk::BufferImageCopy region{};
+		region.bufferOffset = 0;
+		region.bufferRowLength = 0;
+		region.bufferImageHeight = 0;
+		region.imageSubresource = imageSubresourceLayers;
+		region.imageOffset = vk::Offset3D{ 0, 0, 0 };
+		region.imageExtent = vk::Extent3D{ width, height, 1 };
+
+		commandBuffer.copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, region);
+
+	}
+
+	void createDescriptorPool() {
+		vk::DescriptorPoolSize poolSize{};
+		poolSize.type = vk::DescriptorType::eUniformBuffer;
+		poolSize.descriptorCount = MAX_FRAMES_IN_FLIGHT;
+
+		vk::DescriptorPoolCreateInfo poolInfo{};
+		poolInfo.flags = vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet;
+		poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+		poolInfo.poolSizeCount = 1;
+		poolInfo.pPoolSizes = &poolSize;
+
+		descriptorPool = vk::raii::DescriptorPool(device, poolInfo);
+	}
+
+	void createDescriptorSets() {
+		std::vector<vk::DescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, *descriptorSetLayout);
+		vk::DescriptorSetAllocateInfo allocInfo{};
+		allocInfo.descriptorPool = descriptorPool;
+		allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+		allocInfo.pSetLayouts = layouts.data();
+
+		descriptorSets = device.allocateDescriptorSets(allocInfo);
+
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+			vk::DescriptorBufferInfo bufferInfo{};
+			bufferInfo.buffer = uniformBuffers[i];
+			bufferInfo.offset = 0;
+			bufferInfo.range = sizeof(UniformBufferObject);
+
+			vk::WriteDescriptorSet   descriptorWrite{};
+			descriptorWrite.dstSet = descriptorSets[i];
+			descriptorWrite.dstBinding = 0;
+			descriptorWrite.dstArrayElement = 0;
+			descriptorWrite.descriptorCount = 1;
+			descriptorWrite.descriptorType = vk::DescriptorType::eUniformBuffer;
+			descriptorWrite.pBufferInfo = &bufferInfo;
+
+			device.updateDescriptorSets(descriptorWrite, {});
+		}
+	}
+
+
 	void createCommandBuffer() {
 		vk::CommandBufferAllocateInfo allocateInfo{};
 		allocateInfo.commandPool = commandPool;
@@ -650,8 +802,50 @@ private:
 
 		presentInfoKHR.pResults = nullptr;
 
-		result = graphicsQueue.presentKHR(presentInfoKHR);
+		try {
+			result = graphicsQueue.presentKHR(presentInfoKHR);
+			//std::cout << "present returned\n";
+		}
+		catch (const vk::OutOfDateKHRError&) {
+			std::cout << "PRESENT THREW OUT OF DATE\n";
+			recreateSwapChain();
+			return;
+		}
+		//std::cout << "what about here\n";
+		if ((result == vk::Result::eSuboptimalKHR) || (result == vk::Result::eErrorOutOfDateKHR) || frameBufferResized) {
+			std::cout << "recreating swapchain due to window resize...\n";
+			frameBufferResized = false;
+			recreateSwapChain();
+		}
+		else {
+			//std::cout << frameBufferResized;
+			//std::cout << " at drawfence\n";
+			assert(result == vk::Result::eSuccess);
+		}
 	}
+
+	void cleanupSwapChain() {
+		std::cout << "cleaning swap chain...\n";
+		swapChainImageViews.clear();
+		swapChain = nullptr;
+	}
+
+	void recreateSwapChain() {
+		int width = 0, height = 0;
+		glfwGetFramebufferSize(window, &width, &height);
+		while (width == 0 || height == 0) {
+			std::cout << "minimised...\n";
+			glfwGetFramebufferSize(window, &width, &height);
+			glfwWaitEvents();
+		}
+		std::cout << "waiting for idle...\n";
+
+		device.waitIdle();
+		cleanupSwapChain();
+		createSwapChain();
+		createImageViews();
+	}
+
 
 	void cleanup() {
 		glfwDestroyWindow(window);
@@ -660,6 +854,33 @@ private:
 
 
 	//HELPERS//
+
+	vk::raii::CommandBuffer beginSingleTimeCommands()
+	{
+		vk::CommandBufferAllocateInfo allocInfo{};
+		allocInfo.commandPool = commandPool;
+		allocInfo.level = vk::CommandBufferLevel::ePrimary;
+		allocInfo.commandBufferCount = 1;
+		vk::raii::CommandBuffer commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+
+		vk::CommandBufferBeginInfo beginInfo{};
+		beginInfo.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+		commandBuffer.begin(beginInfo);
+
+		return std::move(commandBuffer);
+	}
+
+	void endSingleTimeCommands(vk::raii::CommandBuffer&& commandBuffer)
+	{
+		commandBuffer.end();
+
+		vk::SubmitInfo submitInfo{};
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &*commandBuffer;
+		graphicsQueue.submit(submitInfo, nullptr);
+		graphicsQueue.waitIdle();
+	}
+
 
 	std::pair<vk::raii::Image, vk::raii::DeviceMemory> createImage(uint32_t width, uint32_t height, vk::Format format, vk::ImageTiling tiling, vk::ImageUsageFlags usage, vk::MemoryPropertyFlags properties) {
 		vk::ImageCreateInfo imageInfo{};
